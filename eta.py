@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ETA for Claude Code turns, from local transcripts. Zero tokens.
   eta.py train   -> scan ~/.claude/projects, write eta-turns.json, print holdout accuracy (-q: skip)
-  eta.py         -> status line (reads Claude Code's status JSON on stdin)
+  eta.py         -> status line (reads Claude Code's status JSON on stdin); also times running subagents
 """
 import json, os, sys, glob, time, math, subprocess
 from datetime import datetime
@@ -29,6 +29,8 @@ def bucket(text):
     size = 's' if len(w) < 12 else 'm' if len(w) < 60 else 'l'
     return f'{first}|{size}', size
 
+def ntools(m): return sum(1 for x in m.get('content') or [] if isinstance(x, dict) and x.get('type') == 'tool_use')
+
 def turns(lines):
     """Yield (start, end, tools, text, done) per real prompt."""
     cur = None
@@ -38,17 +40,33 @@ def turns(lines):
         t = d.get('timestamp')
         if not t: continue
         text = prompt_text(d)
-        if text is not None:
+        if text is not None and not (d.get('isMeta') and cur and not cur[4]):  # mid-turn image/skill body continues the turn
             if cur: yield cur
             cur = [ts(t), ts(t), 0, text, False]
         elif cur and not d.get('isSidechain'):
             if d.get('type') == 'assistant':
                 cur[1] = ts(t); m = d.get('message', {})
-                cur[2] += sum(1 for x in m.get('content') or [] if isinstance(x, dict) and x.get('type') == 'tool_use')
+                cur[2] += ntools(m)
                 if m.get('stop_reason') == 'end_turn': cur[4] = True
             elif d.get('subtype') == 'stop_hook_summary':
                 cur[1] = ts(t); cur[4] = True
     if cur: yield cur
+
+def agent_run(f):
+    """(start, end, tools, 'agent:<type>', done) for one subagent transcript."""
+    try: meta = json.load(open(f[:-6] + '.meta.json'))
+    except (OSError, ValueError): meta = {}
+    s = e = None; n = 0; done = False
+    with open(f, errors='ignore') as fh:
+        for l in fh:
+            try: d = json.loads(l)
+            except ValueError: continue
+            if not d.get('timestamp'): continue
+            e = ts(d['timestamp']); s = s or e
+            m = d['message'] if isinstance(d.get('message'), dict) else {}
+            if d.get('type') == 'assistant': n += ntools(m)
+            done = m.get('stop_reason') in ('end_turn', 'stop_sequence') or bool(d.get('toolEndsTurn'))
+    return s, e, n, 'agent:' + meta.get('agentType', '?'), done or bool(meta.get('finished'))
 
 def pace(durs):
     """Geometric mean of the session's last 3 finished turns, or None."""
@@ -60,7 +78,10 @@ def ok(s, e, done): return done and 1 <= e - s <= MAX_TURN
 def train():
     rows = []
     for f in glob.glob(f'{ROOT}/**/*.jsonl', recursive=True):
-        if '/subagents/' in f: continue
+        if '/subagents/' in f:
+            s, e, n, b, done = agent_run(f)
+            if s and ok(s, e, done): rows.append([s, round(e - s, 1), n, b, 'agent', None])
+            continue
         prev = []
         with open(f, errors='ignore') as fh:
             for s, e, n, text, done in turns(fh):
@@ -83,26 +104,43 @@ def predict(rows, b, size, elapsed=0, tools=0, sess=None):
         live = [r[1] - elapsed for r in pool if r[1] > elapsed and r[2] >= tools]
         if len(live) >= 20: break
     p50, p90 = q(live, .5), q(live, .9)
-    if p50 and sess and sess > elapsed:
-        p50 = math.exp(W * math.log(sess - elapsed) + (1 - W) * math.log(p50))
+    if p50 and sess and sess > elapsed:  # weight fades to 0 as the turn outlasts the session's pace
+        w = W * (1 - elapsed / sess) ** 2
+        p50 = math.exp(w * math.log(sess - elapsed) + (1 - w) * math.log(p50))
     return p50, p90
+
+def c(code, s): return s if os.environ.get('NO_COLOR') else f'\033[{code}m{s}\033[0m'
 
 def fmt(s):
     if s is None: return '?'
     s = int(s); return f'{s}s' if s < 60 else f'{s//60}m{s%60:02d}s' if s < 3600 else f'{s//3600}h{s%3600//60:02d}m'
 
 def evaluate(rows):
-    cut = int(len(rows) * .8); hist, test = rows[:cut], rows[cut:]
-    print(f'turns: {len(rows)} (train {len(hist)}, test {len(test)})')
-    print('checkpoint   within 2x of p50   under p90   median abs err')
-    for at in (0, 30, 120):
-        hit = cov = 0; errs = []
-        t = [r for r in test if r[1] > at]
-        for r in t:
-            p50, p90 = predict(hist, r[3], r[4], at, sess=r[5])
-            rem = r[1] - at
-            hit += p50 / 2 <= rem <= p50 * 2; cov += rem <= p90; errs.append(abs(rem - p50))
-        print(f'{"t="+str(at)+"s":<12} {hit/len(t):>8.0%}{"":>11}{cov/len(t):>6.0%}{"":>6}{fmt(q(errs,.5)):>8}   (n={len(t)})')
+    cut = int(len(rows) * .8); hist = rows[:cut]
+    print(f'{len(rows)} turns and subagent runs: train on oldest {cut}, test on newest {len(rows) - cut}')
+    for kind in ('turns', 'subagents'):
+        test = [r for r in rows[cut:] if (r[4] == 'agent') == (kind == 'subagents')]
+        print(f'\n{kind:<12} within 2x of p50   under p90   median abs err')
+        for at in (0, 30, 120):
+            t = [r for r in test if r[1] > at]
+            if not t: continue
+            hit = cov = 0; errs = []
+            for r in t:
+                p50, p90 = predict(hist, r[3], r[4], at, sess=r[5])
+                rem = r[1] - at
+                hit += p50 / 2 <= rem <= p50 * 2; cov += rem <= p90; errs.append(abs(rem - p50))
+            print(f'{"t="+str(at)+"s":<12} {hit/len(t):>8.0%}{"":>11}{cov/len(t):>6.0%}{"":>6}{fmt(q(errs,.5)):>8}   (n={len(t)})')
+
+def agents_line(rows, path):
+    """Running subagents of this session: how many, and time until the last one finishes."""
+    now = time.time(); est = []
+    for f in glob.glob(os.path.splitext(path)[0] + '/subagents/*.jsonl'):
+        if now - os.path.getmtime(f) > 1800: continue  # ponytail: silent 30 min = dead; a longer single tool call drops out
+        s, e, n, b, done = agent_run(f)
+        if s and not done: est.append(predict(rows, b, 'agent', now - s, n))
+    if not est: return ''
+    k = len(est); p50 = max(p or 0 for p, _ in est); p90 = max(p or 0 for _, p in est)
+    return c('35', f' · {k} agent{"s" * (k != 1)} ~{fmt(p50)}') + c('2', f' (p90 {fmt(p90)})')
 
 def statusline():
     try: info = json.load(sys.stdin)
@@ -124,13 +162,14 @@ def statusline():
     if not ts_: print('ETA –'); return
     s, e, n, text, done = ts_[-1]; b, size = bucket(text)
     sess = pace([t[1] - t[0] for t in ts_[:-1] if ok(t[0], t[1], t[4])])
+    ag = agents_line(rows, path)
     if done:
         p50, _ = predict(rows, b, size, sess=sess)
-        print(f'last turn {fmt(e - s)} · predicted {fmt(p50)}'); return
+        print(c('32', f'last turn {fmt(e - s)}') + c('2', f' · predicted {fmt(p50)}') + ag); return
     el = time.time() - s
     p50, p90 = predict(rows, b, size, el, n, sess)
-    over = ' ⚠ slow' if p50 is None or el > 3 * (predict(rows, b, size)[0] or 1e9) else ''
-    print(f'ETA ~{fmt(p50)} (p90 {fmt(p90)}) · {fmt(el)} in · {n} tools{over}')
+    over = c('33', ' ⚠ slow') if p50 is None or el > 3 * (predict(rows, b, size)[0] or 1e9) else ''
+    print(c('1;36', f'ETA ~{fmt(p50)}') + c('2', f' (p90 {fmt(p90)}) · {fmt(el)} in · {n} tool{"s" * (n != 1)}') + over + ag)
 
 if __name__ == '__main__':
     if sys.argv[1:2] == ['train']:

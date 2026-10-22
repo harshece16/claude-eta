@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="356" viewBox="0 0 880 356" role="img" aria-label="Four claude-eta status lines: a running turn with a subagent, a finished turn with a background subagent, a finished turn next to its prediction, and a long turn flagged slow">
+  <style>
+    .cap { font: 500 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; fill: #8b949e; letter-spacing: .02em; }
+    .ln { font: 14.5px ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace; fill: #7d8590; white-space: pre; }
+    .eta { fill: #56d4ef; font-weight: 700; }
+    .ag { fill: #d58cf2; }
+    .ok { fill: #3fb950; }
+    .slow { fill: #e3b341; }
+    .ttl { font: 12px ui-monospace, "SF Mono", Menlo, Consolas, monospace; fill: #6e7681; }
+  </style>
+  <rect width="880" height="356" rx="12" fill="#0d1117"/>
+  <rect x=".5" y=".5" width="879" height="355" rx="11.5" fill="none" stroke="#30363d"/>
+  <circle cx="22" cy="20" r="6" fill="#ff5f57"/><circle cx="42" cy="20" r="6" fill="#febc2e"/><circle cx="62" cy="20" r="6" fill="#28c840"/>
+  <text class="ttl" x="440" y="24" text-anchor="middle">claude-eta · status line</text>
+  <line x1="0" y1="40" x2="880" y2="40" stroke="#21262d"/>
+
+  <text class="cap" x="28" y="72">A turn and a subagent running</text>
+  <text class="ln" x="28" y="96" xml:space="preserve"><tspan class="eta">ETA ~6m36s</tspan> (p90 40m45s) · 3m44s in · 11 tools<tspan class="ag"> · 1 agent ~11m08s</tspan> (p90 46m17s)</text>
+
+  <text class="cap" x="28" y="144">Turn finished, a background subagent still working</text>
+  <text class="ln" x="28" y="168" xml:space="preserve"><tspan class="ok">last turn 9s</tspan> · predicted 38s<tspan class="ag"> · 1 agent ~10m31s</tspan> (p90 39m37s)</text>
+
+  <text class="cap" x="28" y="216">Turn finished: actual time next to the prediction</text>
+  <text class="ln" x="28" y="240" xml:space="preserve"><tspan class="ok">last turn 2m25s</tspan> · predicted 1m48s</text>
+
+  <text class="cap" x="28" y="288">Ran past 3x its usual time</text>
+  <text class="ln" x="28" y="312" xml:space="preserve"><tspan class="eta">ETA ~10m01s</tspan> (p90 1h10m) · 13m24s in · 36 tools<tspan class="slow"> ⚠ slow</tspan></text>
+</svg>
